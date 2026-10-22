@@ -77,6 +77,34 @@ npm run preview
 
 The production files are generated in `dist/`.
 
+## Test and type-check
+
+```bash
+npm test
+npm run typecheck
+npm run build
+```
+
+Tests cover answer normalization, accepted free-text answers, A1 curriculum structure, replay XP prevention, streak continuity, missed-day resets, and daily XP rollover.
+
+## Architecture and deployment notes
+
+- The frontend is React 19, TypeScript, and Vite, with Supabase JavaScript authentication/database support.
+- The current app is a state-driven single-page experience rather than a multi-route application. `vercel.json` provides the SPA fallback for page refreshes.
+- Course exercises are beginning to move out of the React component into [src/data/curriculum.ts](src/data/curriculum.ts).
+- Progress is saved locally and, when signed in, in the existing `learner_progress` table.
+- Lesson rewards currently remain client-calculated; the reviewed SQL migration in `supabase/migrations/20261022000001_secure_lesson_completion.sql` provides a server-side design but must be tested and approved before application.
+- The tutor Edge Function requires its own Supabase deployment and server-side `OPENAI_API_KEY` secret.
+
+## Vercel environment variables
+
+Configure these values in Vercel Project Settings. Do not add the Supabase access token, service-role key, database password, or OpenAI key as `VITE_*` variables.
+
+```text
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-publishable-key
+```
+
 ## Project structure
 
 ```text

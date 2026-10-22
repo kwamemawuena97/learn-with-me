@@ -2,28 +2,17 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { type User } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
 import { parseTutorReply, tutorLevelFromXp, tutorLevelName, tutorStarterPrompts, type TutorReply, type TutorTurn } from './lib/tutor'
+import { calculateLessonReward, dateKey } from './lib/progress'
+import { englishA1Course } from './data/curriculum'
+import { flattenA1Course, validateLessonAnswer, type CompatibleLesson, type CompatibleQuestion } from './data/lessonAdapter'
 import {
   BookOpen, Flame, Heart, Home, Trophy, UserRound, Zap, ChevronRight,
   Check, X, LockKeyhole, RotateCcw, Target, Sparkles, Menu, Volume2, ChevronDown,
   ChartNoAxesCombined, Award, Clock3, MessageCircle, Send
 } from 'lucide-react'
 
-type Question = {
-  prompt: string
-  hint: string
-  options: string[]
-  answer: string
-  explanation: string
-}
-type Lesson = {
-  id: number
-  courseLevel: 'A1' | 'A2'
-  title: string
-  subtitle: string
-  unit: string
-  emoji: string
-  questions: Question[]
-}
+type Question = CompatibleQuestion
+type Lesson = CompatibleLesson
 type Progress = {
   xp: number
   streak: number
@@ -45,7 +34,7 @@ type TutorMessage = {
   reply?: TutorReply
 }
 
-const lessons: Lesson[] = [
+const legacyLessons: Lesson[] = [
   {
     id: 1, courseLevel: 'A1', title: 'Hello, there!', subtitle: 'Greetings and introductions', unit: 'Unit 1 · Basics', emoji: '👋',
     questions: [
@@ -128,8 +117,12 @@ const lessons: Lesson[] = [
   },
 ]
 
+const structuredA1Lessons = flattenA1Course(englishA1Course)
+const legacyA2Lessons = legacyLessons.slice(4).map((lesson, index) => ({ ...lesson, id: 19 + index }))
+const lessons: Lesson[] = [...structuredA1Lessons, ...legacyA2Lessons]
+
 const courseUnits = [
-  { courseLevel: 'A1', label: 'A1 · STARTER', title: 'Start communicating', description: 'Everyday English essentials.', emoji: '🌱' },
+  { courseLevel: 'A1', label: 'A1 · STARTER', title: englishA1Course.title, description: englishA1Course.description, emoji: '🌱' },
   { courseLevel: 'A2', label: 'A2 · NEXT LEVEL', title: 'Everyday conversations', description: 'Past events, plans, directions, and advice.', emoji: '🧭' },
 ] as const
 
@@ -309,7 +302,8 @@ export default function App() {
   const visibleLessonCount = firstIncompleteIndex === -1 ? lessons.length : firstIncompleteIndex + 1
   const visibleLessons = lessons.slice(0, visibleLessonCount)
   const upcomingLessons = lessons.slice(visibleLessonCount)
-  const currentCourseLevel = lessons.find(lesson => !progress.completedLessons.includes(lesson.id))?.courseLevel ?? 'A2'
+  const nextLesson = firstIncompleteIndex === -1 ? lessons[lessons.length - 1] : lessons[firstIncompleteIndex]
+  const currentCourseLevel = nextLesson?.courseLevel ?? 'A2'
   const goalPercent = Math.min(100, Math.round((progress.todayXp / progress.dailyGoal) * 100))
   const currentQuestion = activeLesson?.questions[questionIndex]
   const weekActivity = useMemo(() => {
@@ -353,7 +347,7 @@ export default function App() {
   function submitAnswer() {
     if (!currentQuestion || !selected || checked) return
     setChecked(true)
-    const correct = selected === currentQuestion.answer
+    const correct = validateLessonAnswer(selected, currentQuestion)
     setSessionAnswered(v => v + 1)
     setProgress(p => ({
       ...p,
@@ -364,25 +358,37 @@ export default function App() {
     if (correct) setSessionCorrect(v => v + 1)
   }
 
-  function awardLesson(xpEarned: number) {
-    const today = todayKey()
+  function awardLesson(correctAnswers: number) {
+    if (!activeLesson) return 0
+    const today = dateKey()
+    let earned = 0
     setProgress(p => {
-      const sameDay = p.lastStudyDate === today
-      const streak = sameDay ? p.streak : p.lastStudyDate === yesterdayKey() ? Math.max(1, p.streak + 1) : 1
-      const completedLessons = p.completedLessons.includes(activeLesson!.id)
-        ? p.completedLessons
-        : [...p.completedLessons, activeLesson!.id]
+      const result = calculateLessonReward({
+        completedLessonIds: p.completedLessons,
+        lessonId: activeLesson.id,
+        correctAnswers,
+        totalQuestions: activeLesson.questions.length,
+        activityXp: 0,
+        currentTodayXp: p.todayXp,
+        todayDate: p.todayDate,
+        activityDate: today,
+        lastStudyDate: p.lastStudyDate,
+        streak: p.streak,
+      })
+      earned = result.xpEarned
+      setSessionXp(result.xpEarned)
       return {
         ...p,
-        xp: p.xp + xpEarned,
-        todayXp: (p.todayDate === today ? p.todayXp : 0) + xpEarned,
+        xp: p.xp + result.xpEarned,
+        todayXp: result.todayXp,
         todayDate: today,
-        streak,
+        streak: result.streak,
         lastStudyDate: today,
-        completedLessons,
-        activityByDate: { ...p.activityByDate, [today]: (p.activityByDate[today] ?? 0) + xpEarned },
+        completedLessons: result.completedLessonIds,
+        activityByDate: { ...p.activityByDate, [today]: (p.activityByDate[today] ?? 0) + result.xpEarned },
       }
     })
+    return earned
   }
 
   function nextQuestion() {
@@ -392,11 +398,7 @@ export default function App() {
       setSelected(null)
       setChecked(false)
     } else {
-      const baseXp = sessionCorrect * 10
-      const perfectBonus = sessionCorrect === activeLesson.questions.length ? 10 : 0
-      const earned = progress.completedLessons.includes(activeLesson.id) ? 0 : baseXp + perfectBonus
-      setSessionXp(earned)
-      awardLesson(earned)
+      awardLesson(sessionCorrect)
       setFinished(true)
     }
   }
@@ -544,7 +546,7 @@ export default function App() {
           <div className="question-art">{activeLesson.emoji}</div>
           <p className="question-hint"><span>💡</span> {currentQuestion.hint}</p>
           <div className="answer-list">
-            {currentQuestion.options.map(option => {
+            {currentQuestion.options.length > 0 ? currentQuestion.options.map(option => {
               const isAnswer = checked && option === currentQuestion.answer
               const isWrong = checked && option === selected && !isCorrect
               return (
@@ -555,7 +557,7 @@ export default function App() {
                   {isWrong && <X size={19} />}
                 </button>
               )
-            })}
+            }) : <label className="text-answer-label"><span>Your answer</span><input className="text-answer-input" type="text" value={selected ?? ''} onChange={event => chooseAnswer(event.target.value)} disabled={checked} autoComplete="off" /></label>}
           </div>
           {checked && <div className={`feedback ${isCorrect ? 'feedback-correct' : 'feedback-wrong'}`}>
             <div className="feedback-title">{isCorrect ? 'Correct!' : 'Not quite — keep going!'}</div>
@@ -606,7 +608,7 @@ export default function App() {
         {view === 'learn' && <div className="content-grid">
           <section className="learning-column">
             <div className="welcome-row">
-              <div><div className="eyebrow">YOUR LEARNING JOURNEY</div><h1>Keep your momentum.</h1><p>Small steps today. Big progress tomorrow.</p></div>
+              <div><div className="eyebrow">YOUR LEARNING JOURNEY</div><h1>Keep your momentum.</h1><p>Small steps today. Big progress tomorrow.</p>{nextLesson && <button className="primary-button continue-learning-button" onClick={() => beginLesson(nextLesson)}>{firstIncompleteIndex === -1 ? 'Review next lesson' : 'Continue learning'} <ChevronRight size={18} /></button>}</div>
               <div className="mascot" aria-label="Friendly owl mascot"><span>🦉</span><i>Hi!</i></div>
             </div>
             <div className="daily-card">
